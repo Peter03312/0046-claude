@@ -1,0 +1,20 @@
+# Node / frontend
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/blob-report/
+web/.playwright/
+
+# Go
+backend/bin/
+*.db
+*.db-shm
+*.db-wal
+/data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
