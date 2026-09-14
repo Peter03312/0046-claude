@@ -50,7 +50,7 @@ func TestProjectCRUDAndFreeze(t *testing.T) {
 	}
 
 	// Simulate a passing report and confirmation.
-	rep, err := st.CreateReport(p.ID, "passed", "{}", "{}")
+	rep, err := st.CreateReportVersioned(p2.Version, p.ID, "passed", "{}", "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,18 +77,76 @@ func TestProjectCRUDAndFreeze(t *testing.T) {
 func TestCannotConfirmFailedOrExpired(t *testing.T) {
 	st := openTestStore(t)
 	p, _ := st.CreateProject("p")
-	fail, err := st.CreateReport(p.ID, "failed", "{}", "{}")
+	cur := func() int64 {
+		pp, err := st.GetProject(p.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pp.Version
+	}
+	fail, err := st.CreateReportVersioned(cur(), p.ID, "failed", "{}", "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ConfirmReport(fail.ID); err == nil {
 		t.Fatal("failed report must not confirm")
 	}
-	pass, _ := st.CreateReport(p.ID, "passed", "{}", "{}")
-	// An edit expires the passing report.
+	pass, _ := st.CreateReportVersioned(cur(), p.ID, "passed", "{}", "{}")
+	// An edit expires the passing report and bumps the version.
 	st.CreateSheet(p.ID, SheetInput{Name: "x", Vertices: sqVerts(), R: 0, G: 0, B: 0, OpacityMillis: 1000})
 	if _, err := st.ConfirmReport(pass.ID); err == nil {
 		t.Fatal("expired report must not confirm")
+	}
+}
+
+// A report whose snapshot version no longer matches must never be stored:
+// simulate an edit racing the proof by attempting insert against an old
+// version.
+func TestVersionedReportRejectsRacedEdit(t *testing.T) {
+	st := openTestStore(t)
+	p, _ := st.CreateProject("p")
+	st.CreateSheet(p.ID, SheetInput{Name: "x", Vertices: sqVerts(), R: 0, G: 0, B: 0, OpacityMillis: 1000})
+	p2, _ := st.GetProject(p.ID)
+	// Pretend the proof ran against version 1 but inputs are now at version 2.
+	if _, err := st.CreateReportVersioned(p2.Version-1, p.ID, "passed", "{}", "{}"); !errors.Is(err, ErrStaleReport) {
+		t.Fatalf("want ErrStaleReport, got %v", err)
+	}
+	// Current version is accepted.
+	if _, err := st.CreateReportVersioned(p2.Version, p.ID, "passed", "{}", "{}"); err != nil {
+		t.Fatalf("current version must be accepted: %v", err)
+	}
+}
+
+// Renaming a frozen project is rejected; renaming a live one invalidates
+// existing reports because the name is part of the frozen input snapshot.
+func TestRenameFreezeAndInvalidation(t *testing.T) {
+	st := openTestStore(t)
+	p, _ := st.CreateProject("before")
+	rep, err := st.CreateReportVersioned(p.Version, p.ID, "passed", "{}", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RenameProject(p.ID, "after"); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := st.GetReport(rep.ID)
+	if !r2.Expired {
+		t.Fatal("rename must expire existing reports")
+	}
+	pp, _ := st.GetProject(p.ID)
+	pass2, _ := st.CreateReportVersioned(pp.Version, p.ID, "passed", "{}", "{}")
+	if _, err := st.ConfirmReport(pass2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RenameProject(p.ID, "third"); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("rename while frozen must fail, got %v", err)
+	}
+	got, _ := st.GetProject(p.ID)
+	if got.Name != "after" {
+		t.Fatalf("frozen rename changed name: %s", got.Name)
+	}
+	if err := st.DeleteProject(p.ID); !errors.Is(err, ErrFrozen) {
+		t.Fatalf("delete while frozen must fail, got %v", err)
 	}
 }
 

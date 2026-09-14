@@ -126,6 +126,8 @@ test('细缝漏色失败 → 共边修正通过 → 确认冻结 → 解冻编�
   await page.getByTestId('tab-sheets').click()
   await expect(page.getByRole('button', { name: '删' }).first()).toBeDisabled()
   await page.getByTestId('tab-proof').click()
+  // Renaming the project is also an input change and must be frozen.
+  await expect(page.getByRole('button', { name: '重命名' })).toBeDisabled()
 
   // Unfreeze, edit, previous report is expired.
   await page.getByTestId('unfreeze').click()
@@ -223,4 +225,22 @@ test('画布点击吸附整数坐标', async ({ page }) => {
     els.map((e) => Number((e as HTMLInputElement).value)),
   )
   for (const v of vals) expect(Number.isInteger(v)).toBeTruthy()
+})
+
+test('两个同范围不同颜色的目标区整单拒绝，不允许误判通过', async ({ page }) => {
+  await page.goto('/')
+  await uniqueProject(page, 'dup-target')
+  await createSheet(page, '红片', SQUARE, [255, 0, 0], 1000)
+
+  await createAct(page, '冲突幕')
+  await addSheetByName(page, '红片')
+  await addRegion(page, 'target', '要红', SQUARE, [255, 0, 0], 0)
+  await addRegion(page, 'target', '要蓝', SQUARE, [0, 0, 255], 0)
+  await page.getByTestId('save-act').click()
+
+  await page.getByTestId('tab-proof').click()
+  await page.getByTestId('run-proof').click()
+  await expect(page.getByTestId('proof-status')).toContainText('输入无效，整单拒绝')
+  await expect(page.getByTestId('invalid-reason')).toContainText('overlap with positive area')
+  await expect(page.getByTestId('confirm')).toHaveCount(0)
 })

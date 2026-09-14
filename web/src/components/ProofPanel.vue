@@ -52,6 +52,12 @@ async function runProof() {
     if (e instanceof ApiError && e.status === 422 && e.data) {
       state.lastReport = e.data as typeof state.lastReport
       await refreshProject()
+    } else if (e instanceof ApiError && e.status === 409 && /changed while the proof/i.test(e.message)) {
+      // The manuscript was edited while the proof ran: the verdict belongs
+      // to the old inputs and was deliberately not stored or confirmable.
+      state.lastReport = null
+      message.value = '校样计算期间输入发生了修改，本次结果已作废，请重新运行校样。'
+      await refreshProject()
     } else {
       message.value = '校样失败：' + errorMessage(e)
     }

@@ -337,6 +337,70 @@ func TestRegionOverlapRejected(t *testing.T) {
 	}
 }
 
+// Two target regions with identical boundaries but different demanded colours
+// overlap everywhere with positive area: they cannot both be satisfied and
+// must be rejected rather than silently passing (regardless of order).
+func TestIdenticalTargetRegionsRejected(t *testing.T) {
+	for order := 0; order < 2; order++ {
+		a := targetRegion("red", square(0, 0, 8, 8), [3]int{255, 0, 0}, 0)
+		b := targetRegion("blue", square(0, 0, 8, 8), [3]int{0, 0, 255}, 0)
+		regs := []Region{a, b}
+		if order == 1 {
+			regs = []Region{b, a}
+		}
+		if _, err := Evaluate(ActInput{Regions: regs}); err == nil {
+			t.Fatalf("order %d: identical target regions with different colors must be rejected", order)
+		}
+	}
+}
+
+// Edge-aligned partial overlap: A=[0,10]x[0,10], B=[5,15]x[0,10] share the
+// slab [5,10]x[0,10] but no edge properly crosses and every shared vertex
+// lies on an edge, so a vertex/crossing heuristic cannot see the overlap.
+// The face-based test must reject it in both orders.
+func TestEdgeAlignedPartialRegionOverlapRejected(t *testing.T) {
+	regs := []Region{
+		targetRegion("a", square(0, 0, 10, 10), [3]int{0, 0, 0}, 0),
+		targetRegion("b", square(5, 0, 15, 10), [3]int{255, 255, 255}, 0),
+	}
+	for order := 0; order < 2; order++ {
+		act := ActInput{Regions: regs}
+		if order == 1 {
+			act.Regions = []Region{regs[1], regs[0]}
+		}
+		if _, err := Evaluate(act); err == nil {
+			t.Fatalf("order %d: edge-aligned partial overlap must be rejected", order)
+		}
+	}
+}
+
+// A target fully contained inside a blank region makes the interior obey two
+// rules and must be rejected.
+func TestContainedRegionOverlapRejected(t *testing.T) {
+	act := ActInput{
+		Regions: []Region{
+			blankRegion("big", square(0, 0, 20, 20)),
+			targetRegion("small", square(5, 5, 15, 15), [3]int{1, 2, 3}, 0),
+		},
+	}
+	if _, err := Evaluate(act); err == nil {
+		t.Fatal("contained target inside blank must be rejected")
+	}
+}
+
+// Point-only contact between two regions remains legal.
+func TestRegionPointContactLegal(t *testing.T) {
+	act := ActInput{
+		Regions: []Region{
+			targetRegion("a", square(0, 0, 10, 10), [3]int{255, 255, 255}, 0),
+			blankRegion("b", square(10, 10, 20, 20)),
+		},
+	}
+	if bad, err := Evaluate(act); err != nil || len(bad) != 0 {
+		t.Fatalf("point contact legal: %v %+v", err, bad)
+	}
+}
+
 // Self-intersecting inputs of every flavor are rejected before any analysis.
 func TestSelfIntersectingRejected(t *testing.T) {
 	cases := map[string][]IntPoint{

@@ -15,6 +15,11 @@ import (
 type Server struct {
 	st *store.Store
 	r  chi.Router
+
+	// beforePersistProof, when set, runs after geometric evaluation and
+	// before persisting a report. Tests use it to deterministically simulate
+	// an edit racing the proof; it is never set in production.
+	beforePersistProof func(projectID int64) error
 }
 
 func NewServer(st *store.Store) *Server {
@@ -118,6 +123,8 @@ func mapStoreError(w http.ResponseWriter, err error) bool {
 		writeErr(w, http.StatusNotFound, "not found")
 	case errors.Is(err, store.ErrFrozen):
 		writeErr(w, http.StatusConflict, "project inputs are frozen; unfreeze the confirmed report before editing")
+	case errors.Is(err, store.ErrStaleReport):
+		writeErr(w, http.StatusConflict, err.Error())
 	default:
 		return false
 	}

@@ -13,6 +13,11 @@ var ErrNotFound = errors.New("not found")
 // ErrFrozen is returned when a frozen (confirmed) project is edited.
 var ErrFrozen = errors.New("project inputs are frozen by a confirmed report")
 
+// ErrStaleReport is returned when a proof finishes against a version that no
+// longer matches the stored inputs: an edit raced the proof, so its result
+// must never be recorded or confirmable against the new manuscript.
+var ErrStaleReport = errors.New("project inputs changed while the proof was running; rerun the proof")
+
 // tx runs fn inside a transaction.
 func (s *Store) tx(fn func(*sql.Tx) error) error {
 	t, err := s.db.Begin()
@@ -136,28 +141,27 @@ func (s *Store) RenameProject(id int64, name string) error {
 	if name == "" {
 		return fmt.Errorf("name required")
 	}
-	_, err := s.db.Exec(`UPDATE projects SET name=? WHERE id=?`, name, id)
-	if err != nil {
-		return err
-	}
-	n, err := s.countProjects(id)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-func (s *Store) countProjects(id int64) (int, error) {
-	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM projects WHERE id=?`, id).Scan(&n)
-	return n, err
+	return s.tx(func(t *sql.Tx) error {
+		if err := checkFrozen(t, id); err != nil {
+			return err
+		}
+		res, err := t.Exec(`UPDATE projects SET name=? WHERE id=?`, name, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		// The project name is part of every report's frozen input snapshot.
+		return invalidate(t, id)
+	})
 }
 
 func (s *Store) DeleteProject(id int64) error {
 	return s.tx(func(t *sql.Tx) error {
+		if err := checkFrozen(t, id); err != nil {
+			return err
+		}
 		res, err := t.Exec(`DELETE FROM projects WHERE id=?`, id)
 		if err != nil {
 			return err

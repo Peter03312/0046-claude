@@ -70,7 +70,7 @@ const frozen = computed(() => state.project?.frozen ?? false)
         </label>
         <input v-model="newName" placeholder="新项目名称" data-testid="new-project-name" @keydown.enter="onCreate" />
         <button class="btn" :disabled="creating" data-testid="new-project" @click="onCreate">新建项目</button>
-        <button v-if="state.project" class="btn small" @click="rename">重命名</button>
+        <button v-if="state.project" class="btn small" :disabled="frozen" :title="frozen ? '已确认冻结，需先解冻' : ''" @click="rename">重命名</button>
         <span v-if="createError" class="msg err">{{ createError }}</span>
         <span class="spacer" />
         <span v-if="state.apiError" class="msg err">API 不可用：{{ state.apiError }}</span>

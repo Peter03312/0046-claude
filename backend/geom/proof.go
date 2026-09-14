@@ -61,17 +61,6 @@ func Evaluate(act ActInput) ([]BadCell, error) {
 			return nil, fmt.Errorf("%s: region kind must be target or blank", label)
 		}
 	}
-	// Distinct regions may share edges and points, but positive-area overlap
-	// between two regions would make a cell belong to two rules at once.
-	for i := 0; i < len(act.Regions); i++ {
-		for j := i + 1; j < len(act.Regions); j++ {
-			if polygonsPositiveOverlap(act.Regions[i].Vertices, act.Regions[j].Vertices) {
-				return nil, fmt.Errorf("regions %s and %s overlap with positive area",
-					strung(act.Regions[i].ID, act.Regions[i].Name, i),
-					strung(act.Regions[j].ID, act.Regions[j].Name, j))
-			}
-		}
-	}
 
 	// Gather every boundary edge. Polygon indices 0..S-1 are sheets, the rest
 	// are regions; coincident edges merge and union their owner sets.
@@ -118,6 +107,34 @@ func Evaluate(act ActInput) ([]BadCell, error) {
 		for _, v := range act.Regions[i].Vertices {
 			regionRings[i] = append(regionRings[i], RatPoint{X: ratInt(v.X), Y: ratInt(v.Y)})
 		}
+	}
+
+	// Exact positive-area overlap test via the subdivision itself: two
+	// distinct regions overlap with positive area iff some arrangement face
+	// lies strictly inside both (the representative point is guaranteed to be
+	// off every boundary, so shared edges and shared points never count).
+	// This catches containment, identical boundaries and edge-aligned partial
+	// overlaps — configurations a vertex/edge-classification heuristic misses,
+	// and which would otherwise make a cell obey two possibly contradictory
+	// target colours with an order-dependent outcome.
+	overlapA, overlapB := -1, -1
+outer:
+	for _, f := range faces {
+		var inside []int
+		for ri, ring := range regionRings {
+			if pointInRing(f.outer.rep, ring) {
+				inside = append(inside, ri)
+				if len(inside) == 2 {
+					overlapA, overlapB = inside[0], inside[1]
+					break outer
+				}
+			}
+		}
+	}
+	if overlapA >= 0 {
+		return nil, fmt.Errorf("regions %s and %s overlap with positive area",
+			strung(act.Regions[overlapA].ID, act.Regions[overlapA].Name, overlapA),
+			strung(act.Regions[overlapB].ID, act.Regions[overlapB].Name, overlapB))
 	}
 
 	var bad []BadCell

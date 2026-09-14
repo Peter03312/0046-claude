@@ -369,3 +369,106 @@ func TestValidationErrors(t *testing.T) {
 }
 
 func itoaN(v int64) string { return strconv.FormatInt(v, 10) }
+
+// An edit landing while the proof is being computed must never be labelled
+// with the pre-edit verdict: the whole run is rejected (409) and no report is
+// recorded. The hook deterministically performs the edit after evaluation but
+// before the version-checked insert.
+func TestProofEditDuringRunRejected(t *testing.T) {
+	s, _ := newTestServer(t)
+	h := s.Handler()
+	pid := createProject(t, h, "racing")
+	sid := createSheet(t, h, pid, map[string]any{
+		"name": "p", "vertices": sq(0, 0, 4, 4),
+		"r": 0, "g": 0, "b": 0, "opacityMillis": 1000,
+	})
+	do(t, h, "POST", "/api/projects/"+itoaN(pid)+"/acts", map[string]any{
+		"name": "a",
+		"sheets": []map[string]any{
+			{"sheetId": sid, "rotation": 0, "tx": 0, "ty": 0},
+		},
+		"regions": []map[string]any{
+			{"name": "t", "kind": "target", "vertices": sq(0, 0, 4, 4),
+				"r": 0, "g": 0, "b": 0, "tolerance": 0},
+		},
+	})
+	s.beforePersistProof = func(projectID int64) error {
+		// Simulate the parent editing the manuscript mid-proof.
+		if err := s.st.RenameProject(projectID, "edited mid-run"); err != nil {
+			return err
+		}
+		return nil
+	}
+	code, body := do(t, h, "POST", "/api/projects/"+itoaN(pid)+"/proofs", nil)
+	if code != http.StatusConflict {
+		t.Fatalf("raced proof status=%d body=%v", code, body)
+	}
+	// No report from the stale run.
+	code, raw := doRaw(t, h, "GET", "/api/projects/"+itoaN(pid)+"/reports")
+	if code != 200 {
+		t.Fatalf("list reports: %d", code)
+	}
+	var reps []map[string]any
+	if err := json.Unmarshal(raw, &reps); err != nil || len(reps) != 0 {
+		t.Fatalf("stale run must not be recorded, got %s", string(raw))
+	}
+}
+
+// Renaming a frozen project is blocked; renaming a live one succeeds and
+// expires existing reports.
+func TestRenameFreezeSemantics(t *testing.T) {
+	s, _ := newTestServer(t)
+	h := s.Handler()
+	pid := createProject(t, h, "orig")
+	code, body := do(t, h, "PATCH", "/api/projects/"+itoaN(pid), map[string]any{"name": "live-renamed"})
+	if code != 200 {
+		t.Fatalf("live rename: %d %v", code, body)
+	}
+	sid := createSheet(t, h, pid, map[string]any{
+		"name": "p", "vertices": sq(0, 0, 4, 4),
+		"r": 0, "g": 0, "b": 0, "opacityMillis": 1000,
+	})
+	do(t, h, "POST", "/api/projects/"+itoaN(pid)+"/acts", map[string]any{
+		"name":   "a",
+		"sheets": []map[string]any{{"sheetId": sid, "rotation": 0, "tx": 0, "ty": 0}},
+		"regions": []map[string]any{
+			{"name": "t", "kind": "target", "vertices": sq(0, 0, 4, 4),
+				"r": 0, "g": 0, "b": 0, "tolerance": 0},
+		},
+	})
+	rep := mustReport(t, h, pid)
+	if rep["status"] != "passed" {
+		t.Fatalf("want passed: %v", rep["status"])
+	}
+	rid := mustInt(t, rep["id"], "rid")
+	code, conf := do(t, h, "POST", "/api/reports/"+itoaN(rid)+"/confirm", nil)
+	if code != 200 {
+		t.Fatalf("confirm: %d %v", code, conf)
+	}
+	code, blocked := do(t, h, "PATCH", "/api/projects/"+itoaN(pid), map[string]any{"name": "sneaky"})
+	if code != http.StatusConflict {
+		t.Fatalf("rename frozen project status=%d body=%v", code, blocked)
+	}
+	got := doGetProject(t, h, pid)
+	if got["name"] != "live-renamed" {
+		t.Fatalf("frozen rename leaked: %v", got["name"])
+	}
+}
+
+func mustReport(t *testing.T, h http.Handler, pid int64) map[string]any {
+	t.Helper()
+	code, rep := do(t, h, "POST", "/api/projects/"+itoaN(pid)+"/proofs", nil)
+	if code != 201 {
+		t.Fatalf("proof: %d %v", code, rep)
+	}
+	return rep
+}
+
+func doGetProject(t *testing.T, h http.Handler, pid int64) map[string]any {
+	t.Helper()
+	code, body := do(t, h, "GET", "/api/projects/"+itoaN(pid), nil)
+	if code != 200 {
+		t.Fatalf("get project: %d", code)
+	}
+	return body["project"].(map[string]any)
+}

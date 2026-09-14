@@ -42,7 +42,11 @@ func (s *Server) runProof(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	p, err := s.st.GetProject(pid)
+	// Take one consistent snapshot (project incl. version, sheets, acts).
+	// The resulting report is persisted only if the version is unchanged at
+	// commit time, so an edit made while the proof runs can never have the
+	// old manuscript's verdict stamped onto the new one.
+	snap, err := s.st.ProofSnapshot(pid)
 	if err != nil {
 		if mapStoreError(w, err) {
 			return
@@ -50,16 +54,9 @@ func (s *Server) runProof(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	sheets, err := s.st.ListSheets(pid)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	acts, err := s.st.ListActs(pid)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	p := &snap.Project
+	sheets := snap.Sheets
+	acts := snap.Acts
 	sheetByID := map[int64]store.Sheet{}
 	for _, sh := range sheets {
 		sheetByID[sh.ID] = sh
@@ -103,8 +100,20 @@ func (s *Server) runProof(w http.ResponseWriter, r *http.Request) {
 	input := proofInput{Project: *p, Sheets: sheets, Acts: acts}
 	resultJSON, _ := json.Marshal(result)
 	inputJSON, _ := json.Marshal(input)
-	rep, err := s.st.CreateReport(pid, result.Status, string(resultJSON), string(inputJSON))
+	if s.beforePersistProof != nil {
+		if err := s.beforePersistProof(pid); err != nil {
+			if mapStoreError(w, err) {
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	rep, err := s.st.CreateReportVersioned(p.Version, pid, result.Status, string(resultJSON), string(inputJSON))
 	if err != nil {
+		if mapStoreError(w, err) {
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

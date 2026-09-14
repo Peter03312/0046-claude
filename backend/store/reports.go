@@ -20,19 +20,102 @@ type Report struct {
 	ConfirmedAt *string `json:"confirmedAt,omitempty"`
 }
 
-// CreateReport stores a run against the current project version.
-func (s *Store) CreateReport(projectID int64, status, resultJSON, inputJSON string) (*Report, error) {
+// ProofSnapshot is a consistent view of exactly the inputs a proof evaluated:
+// project (including its version), all sheets and all acts. The proof result
+// is persisted only against SnapshotVersion, never against a version read at
+// insert time, which closes the edit-during-proof race.
+type ProofSnapshot struct {
+	Project Project
+	Sheets  []Sheet
+	Acts    []Act
+}
+
+// ProofSnapshot reads one consistent input snapshot inside a single SQLite
+// transaction.
+func (s *Store) ProofSnapshot(projectID int64) (*ProofSnapshot, error) {
+	t, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer t.Rollback()
+	p, err := scanProject(t, projectID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := t.Query(`SELECT `+sheetCols+` FROM sheets WHERE project_id=? ORDER BY position,id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	var sheets []Sheet
+	for rows.Next() {
+		sh, err := scanSheet(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sheets = append(sheets, *sh)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	actRows, err := t.Query(`SELECT id,project_id,name,position FROM acts WHERE project_id=? ORDER BY position,id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	var actIDs []int64
+	for actRows.Next() {
+		var a Act
+		if err := actRows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Position); err != nil {
+			actRows.Close()
+			return nil, err
+		}
+		actIDs = append(actIDs, a.ID)
+	}
+	actRows.Close()
+	if err := actRows.Err(); err != nil {
+		return nil, err
+	}
+	acts := make([]Act, 0, len(actIDs))
+	for _, id := range actIDs {
+		a, err := loadAct(t, id)
+		if err != nil {
+			return nil, err
+		}
+		acts = append(acts, *a)
+	}
+	if sheets == nil {
+		sheets = []Sheet{}
+	}
+	return &ProofSnapshot{Project: *p, Sheets: sheets, Acts: acts}, nil
+}
+
+// CreateReportVersioned stores a proof result ONLY if the project version is
+// still snapshotVersion. The transaction performs a write first to take the
+// SQLite reserved lock, then re-reads the version: any concurrent edit that
+// bumped the version serialises against this transaction and the report is
+// rejected with ErrStaleReport instead of being stamped onto the new inputs.
+func (s *Store) CreateReportVersioned(snapshotVersion int64, projectID int64, status, resultJSON, inputJSON string) (*Report, error) {
 	if status != "passed" && status != "failed" {
 		return nil, errors.New("status must be passed or failed")
 	}
 	var out Report
 	err := s.tx(func(t *sql.Tx) error {
+		// Acquire a write lock before reading so an in-flight edit cannot
+		// commit between the version check and the report insert.
+		if _, err := t.Exec(`UPDATE projects SET updated_at=updated_at WHERE id=?`, projectID); err != nil {
+			return err
+		}
 		var version int64
-		if err := t.QueryRow(`SELECT version FROM projects WHERE id=?`, projectID).Scan(&version); err != nil {
+		if err := t.QueryRow(`SELECT version FROM projects WHERE id=?`, projectID).
+			Scan(&version); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
 			}
 			return err
+		}
+		if version != snapshotVersion {
+			return ErrStaleReport
 		}
 		res, err := t.Exec(`INSERT INTO reports(project_id,version,status,result_json,input_json) VALUES(?,?,?,?,?)`,
 			projectID, version, status, resultJSON, inputJSON)
